@@ -1,0 +1,127 @@
+import os
+import nltk
+import sounddevice as sd
+from scipy.io.wavfile import write
+from gtts import gTTS
+from pydub import AudioSegment
+import speech_recognition as sr
+from transformers import pipeline
+from playsound import playsound
+
+nltk.download('punkt', quiet=True)
+
+LANGUAGE_MAP = {
+    "en": "English", "fr": "French", "es": "Spanish", "de": "German", "it": "Italian",
+    "pt": "Portuguese", "nl": "Dutch", "ur": "Urdu", "ru": "Russian", "zh": "Chinese",
+    "hi": "Hindi", "ar": "Arabic", "ja": "Japanese", "ko": "Korean", "tr": "Turkish",
+    "sv": "Swedish", "fi": "Finnish", "el": "Greek", "id": "Indonesian", "vi": "Vietnamese"
+}
+
+print("Loading models (this can take a while)...")
+print("Note: For improved tokenization, consider installing 'sacremoses' via `pip install sacremoses`")
+
+language_identifier = pipeline("text-classification", model="papluca/xlm-roberta-base-language-detection")
+translator_to_english = pipeline("translation", model="Helsinki-NLP/opus-mt-mul-en")
+
+def ensure_wav_format(audio_path):
+    if audio_path.lower().endswith(".mp3"):
+        sound = AudioSegment.from_mp3(audio_path)
+        wav_path = audio_path.rsplit(".", 1)[0] + ".wav"
+        sound.export(wav_path, format="wav")
+        return wav_path
+    return audio_path
+
+def transcribe_audio(audio_path):
+    recognizer = sr.Recognizer()
+    try:
+        with sr.AudioFile(audio_path) as source:
+            audio_data = recognizer.record(source)
+            return recognizer.recognize_google(audio_data)
+    except Exception as e:
+        return f"[Error in transcription: {e}]"
+
+def detect_language(text):
+    result = language_identifier(text)
+    return result[0]["label"]
+
+def to_english(text, source_lang):
+    if source_lang == "en":
+        return text
+    result = translator_to_english(text)
+    return result[0]["translation_text"]
+
+def get_translator(target_lang):
+    try:
+        if target_lang == "en":
+            return None
+        elif target_lang == "pt":
+            model = "Helsinki-NLP/opus-mt-en-ROMANCE"
+        elif target_lang == "ja":
+            model = "Helsinki-NLP/opus-mt-en-jap"
+        elif target_lang == "ko":
+            model = "Helsinki-NLP/opus-mt-tc-big-en-ko"
+        elif target_lang == "tr":
+            model = "Helsinki-NLP/opus-mt-tc-big-en-tr"
+        else:
+            model = f"Helsinki-NLP/opus-mt-en-{target_lang}"
+        return pipeline("translation", model=model)
+    except Exception as e:
+        print(f"[Error loading translator for {target_lang} ({model})]: {e}")
+        return None
+
+def to_target_language(text, target_lang):
+    if target_lang == "en" or not target_lang or target_lang not in LANGUAGE_MAP:
+        return text
+    translator = get_translator(target_lang)
+    if translator is None:
+        return f"[Error: Could not load translator for {target_lang}]"
+    if target_lang in ["pt", "ko"]:
+        text = f">>{target_lang}<< {text}"
+    try:
+        return translator(text)[0]['translation_text']
+    except Exception as e:
+        return f"[Error during translation to {target_lang}: {e}]"
+
+def speak_text(text, lang, filename="translated_speech.mp3"):
+    try:
+        tts = gTTS(text=text, lang=lang)
+        tts.save(filename)
+        print(f"Speech saved to {filename}")
+        return filename
+    except Exception as e:
+        print(f"Error generating speech for language {lang}: {e}")
+        return None
+
+def translate_audio(audio_path, target_lang):
+    if not audio_path or not os.path.exists(audio_path):
+        return {"error": "Audio file not found."}
+
+    audio_path_wav = ensure_wav_format(audio_path)
+
+    transcript = transcribe_audio(audio_path_wav)
+    if transcript.startswith("[Error in transcription"):
+        return {"error": transcript}
+
+    src_lang = detect_language(transcript)
+    english_text = to_english(transcript, src_lang)
+    translated_text = to_target_language(english_text, target_lang)
+
+    audio_file = speak_text(translated_text, target_lang)
+
+    # Move the audio file to static folder to serve
+    if audio_file:
+        if not os.path.exists('static'):
+            os.makedirs('static')
+        static_audio_path = os.path.join('static', os.path.basename(audio_file))
+        os.replace(audio_file, static_audio_path)
+        audio_file_url = f"/static/{os.path.basename(audio_file)}"
+    else:
+        audio_file_url = None
+
+    return {
+        "transcript": transcript,
+        "detected_language": LANGUAGE_MAP.get(src_lang, src_lang),
+        "english_translation": english_text,
+        "translated_text": translated_text,
+        "audio_file_url": audio_file_url
+    }
